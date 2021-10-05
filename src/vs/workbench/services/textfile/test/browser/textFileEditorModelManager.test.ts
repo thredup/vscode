@@ -127,11 +127,11 @@ suite('Files - TextFileEditorModelManager', () => {
 		const manager: TestTextFileEditorModelManager = instantiationService.createInstance(TestTextFileEditorModelManager);
 		const resource = URI.file('/path/index.txt');
 
-		const model = await manager.resolve(resource);
+		await manager.resolve(resource);
 
 		let didResolve = false;
 		let onDidResolve = new Promise<void>(resolve => {
-			manager.onDidResolve(() => {
+			manager.onDidResolve(({ model }) => {
 				if (model.resource.toString() === resource.toString()) {
 					didResolve = true;
 					resolve();
@@ -150,10 +150,10 @@ suite('Files - TextFileEditorModelManager', () => {
 		const manager: TestTextFileEditorModelManager = instantiationService.createInstance(TestTextFileEditorModelManager);
 		const resource = URI.file('/path/index.txt');
 
-		const model = await manager.resolve(resource);
+		await manager.resolve(resource);
 
 		let didResolve = false;
-		manager.onDidResolve(() => {
+		manager.onDidResolve(({ model }) => {
 			if (model.resource.toString() === resource.toString()) {
 				didResolve = true;
 			}
@@ -384,5 +384,53 @@ suite('Files - TextFileEditorModelManager', () => {
 
 		model.dispose();
 		manager.dispose();
+	});
+
+	test('file change events trigger reload (on a resolved model)', async () => {
+		const manager: TestTextFileEditorModelManager = instantiationService.createInstance(TestTextFileEditorModelManager);
+		const resource = URI.file('/path/index.txt');
+
+		await manager.resolve(resource);
+
+		let didResolve = false;
+		let onDidResolve = new Promise<void>(resolve => {
+			manager.onDidResolve(({ model }) => {
+				if (model.resource.toString() === resource.toString()) {
+					didResolve = true;
+					resolve();
+				}
+			});
+		});
+
+		accessor.fileService.fireFileChanges(new FileChangesEvent([{ resource, type: FileChangeType.UPDATED }], false));
+
+		await onDidResolve;
+		assert.strictEqual(didResolve, true);
+	});
+
+	test('file change events trigger reload (after a model is resolved: https://github.com/microsoft/vscode/issues/132765)', async () => {
+		const manager: TestTextFileEditorModelManager = instantiationService.createInstance(TestTextFileEditorModelManager);
+		const resource = URI.file('/path/index.txt');
+
+		manager.resolve(resource);
+
+		let didResolve = false;
+		let resolvedCounter = 0;
+		let onDidResolve = new Promise<void>(resolve => {
+			manager.onDidResolve(({ model }) => {
+				if (model.resource.toString() === resource.toString()) {
+					resolvedCounter++;
+					if (resolvedCounter === 2) {
+						didResolve = true;
+						resolve();
+					}
+				}
+			});
+		});
+
+		accessor.fileService.fireFileChanges(new FileChangesEvent([{ resource, type: FileChangeType.UPDATED }], false));
+
+		await onDidResolve;
+		assert.strictEqual(didResolve, true);
 	});
 });

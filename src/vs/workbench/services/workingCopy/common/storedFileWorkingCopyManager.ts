@@ -255,7 +255,7 @@ export class StoredFileWorkingCopyManager<M extends IStoredFileWorkingCopyModel>
 		// Resolve working copies again for file systems that changed
 		// capabilities to fetch latest metadata (e.g. readonly)
 		// into all working copies.
-		this.queueWorkingCopyResolves(e.scheme);
+		this.queueWorkingCopyReloads(e.scheme);
 	}
 
 	private onDidChangeFileSystemProviderRegistrations(e: IFileSystemProviderRegistrationEvent): void {
@@ -268,7 +268,7 @@ export class StoredFileWorkingCopyManager<M extends IStoredFileWorkingCopyModel>
 		// and register the same provider with different capabilities,
 		// so we want to ensure to fetch latest metadata (e.g. readonly)
 		// into all working copies.
-		this.queueWorkingCopyResolves(e.scheme);
+		this.queueWorkingCopyReloads(e.scheme);
 	}
 
 	private onDidFilesChange(e: FileChangesEvent): void {
@@ -277,15 +277,15 @@ export class StoredFileWorkingCopyManager<M extends IStoredFileWorkingCopyModel>
 		// the working copy. We also consider the added event
 		// because it could be that a file was added and updated
 		// right after.
-		this.queueWorkingCopyResolves(e);
+		this.queueWorkingCopyReloads(e);
 	}
 
-	private queueWorkingCopyResolves(scheme: string): void;
-	private queueWorkingCopyResolves(e: FileChangesEvent): void;
-	private queueWorkingCopyResolves(schemeOrEvent: string | FileChangesEvent): void {
+	private queueWorkingCopyReloads(scheme: string): void;
+	private queueWorkingCopyReloads(e: FileChangesEvent): void;
+	private queueWorkingCopyReloads(schemeOrEvent: string | FileChangesEvent): void {
 		for (const workingCopy of this.workingCopies) {
-			if (workingCopy.isDirty() || !workingCopy.isResolved()) {
-				continue; // require a resolved, saved working copy to continue
+			if (workingCopy.isDirty()) {
+				continue; // never reload dirty working copies
 			}
 
 			let resolveWorkingCopy = false;
@@ -296,12 +296,12 @@ export class StoredFileWorkingCopyManager<M extends IStoredFileWorkingCopyModel>
 			}
 
 			if (resolveWorkingCopy) {
-				this.queueWorkingCopyResolve(workingCopy);
+				this.queueWorkingCopyReload(workingCopy);
 			}
 		}
 	}
 
-	private queueWorkingCopyResolve(workingCopy: IStoredFileWorkingCopy<M>): void {
+	private queueWorkingCopyReload(workingCopy: IStoredFileWorkingCopy<M>): void {
 
 		// Resolves a working copy to update (use a queue to prevent accumulation of
 		// resolve when the resolving actually takes long. At most we only want the
@@ -310,7 +310,7 @@ export class StoredFileWorkingCopyManager<M extends IStoredFileWorkingCopyModel>
 		if (queue.size <= 1) {
 			queue.queue(async () => {
 				try {
-					await workingCopy.resolve();
+					await this.reload(workingCopy);
 				} catch (error) {
 					this.logService.error(error);
 				}
@@ -440,7 +440,25 @@ export class StoredFileWorkingCopyManager<M extends IStoredFileWorkingCopyModel>
 
 	//#endregion
 
-	//#region Resolve
+	//#region Reload & Resolve
+
+	private async reload(workingCopy: IStoredFileWorkingCopy<M>): Promise<void> {
+
+		// Await a pending working copy resolve first before proceeding
+		// to ensure that we never resolve a working copy more than once
+		// in parallel.
+		const pendingResolve = this.joinPendingResolves(workingCopy.resource);
+		if (pendingResolve) {
+			await pendingResolve;
+		}
+
+		if (workingCopy.isDirty() || workingCopy.isDisposed() || !this.has(workingCopy.resource)) {
+			return; // the working copy possibly got dirty or disposed, so return early then
+		}
+
+		// Trigger reload
+		await this.doResolve(workingCopy, { reload: { async: false } });
+	}
 
 	async resolve(resource: URI, options?: IStoredFileWorkingCopyManagerResolveOptions): Promise<IStoredFileWorkingCopy<M>> {
 
@@ -452,8 +470,22 @@ export class StoredFileWorkingCopyManager<M extends IStoredFileWorkingCopyModel>
 			await pendingResolve;
 		}
 
+		// Trigger resolve
+		return this.doResolve(resource, options);
+	}
+
+	private async doResolve(resourceOrWorkingCopy: URI | IStoredFileWorkingCopy<M>, options?: IStoredFileWorkingCopyManagerResolveOptions): Promise<IStoredFileWorkingCopy<M>> {
+		let workingCopy: IStoredFileWorkingCopy<M> | undefined;
+		let resource: URI;
+		if (URI.isUri(resourceOrWorkingCopy)) {
+			resource = resourceOrWorkingCopy;
+			workingCopy = this.get(resource);
+		} else {
+			resource = resourceOrWorkingCopy.resource;
+			workingCopy = resourceOrWorkingCopy;
+		}
+
 		let workingCopyResolve: Promise<void>;
-		let workingCopy = this.get(resource);
 		let didCreateWorkingCopy = false;
 
 		const resolveOptions: IStoredFileWorkingCopyResolveOptions = {
