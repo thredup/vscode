@@ -123,6 +123,47 @@ suite('Files - TextFileEditorModelManager', () => {
 		manager.dispose();
 	});
 
+	test('resolve (async)', async () => {
+		const manager: TestTextFileEditorModelManager = instantiationService.createInstance(TestTextFileEditorModelManager);
+		const resource = URI.file('/path/index.txt');
+
+		const model = await manager.resolve(resource);
+
+		let didResolve = false;
+		let onDidResolve = new Promise<void>(resolve => {
+			manager.onDidResolve(() => {
+				if (model.resource.toString() === resource.toString()) {
+					didResolve = true;
+					resolve();
+				}
+			});
+		});
+
+		manager.resolve(resource, { reload: { async: true } });
+
+		await onDidResolve;
+
+		assert.strictEqual(didResolve, true);
+	});
+
+	test('resolve (sync)', async () => {
+		const manager: TestTextFileEditorModelManager = instantiationService.createInstance(TestTextFileEditorModelManager);
+		const resource = URI.file('/path/index.txt');
+
+		const model = await manager.resolve(resource);
+
+		let didResolve = false;
+		manager.onDidResolve(() => {
+			if (model.resource.toString() === resource.toString()) {
+				didResolve = true;
+			}
+		});
+
+		await manager.resolve(resource, { reload: { async: false } });
+		assert.strictEqual(didResolve, true);
+	});
+
+
 	test('resolve with initial contents', async () => {
 		const manager: TestTextFileEditorModelManager = instantiationService.createInstance(TestTextFileEditorModelManager);
 		const resource = URI.file('/test.html');
@@ -143,18 +184,33 @@ suite('Files - TextFileEditorModelManager', () => {
 		const manager: TestTextFileEditorModelManager = instantiationService.createInstance(TestTextFileEditorModelManager);
 		const resource = URI.file('/test.html');
 
-		const firstModelPromise = manager.resolve(resource);
-		const secondModelPromise = manager.resolve(resource, { contents: createTextBufferFactory('Hello World') });
-		const thirdModelPromise = manager.resolve(resource, { contents: createTextBufferFactory('More Changes') });
+		let resolvedModel: unknown;
 
-		await firstModelPromise;
-		await secondModelPromise;
-		const model = await thirdModelPromise;
+		const contents: string[] = [];
+		manager.onDidResolve(e => {
+			if (e.model.resource.toString() === resource.toString()) {
+				resolvedModel = e.model as TextFileEditorModel;
+				contents.push(e.model.textEditorModel!.getValue());
+			}
+		});
 
-		assert.strictEqual(model.textEditorModel?.getValue(), 'More Changes');
-		assert.strictEqual(model.isDirty(), true);
+		await Promise.all([
+			manager.resolve(resource),
+			manager.resolve(resource, { contents: createTextBufferFactory('Hello World') }),
+			manager.resolve(resource, { reload: { async: false } }),
+			manager.resolve(resource, { contents: createTextBufferFactory('More Changes') })
+		]);
 
-		model.dispose();
+		assert.ok(resolvedModel instanceof TextFileEditorModel);
+
+		assert.strictEqual(resolvedModel.textEditorModel?.getValue(), 'More Changes');
+		assert.strictEqual(resolvedModel.isDirty(), true);
+
+		assert.strictEqual(contents[0], 'Hello Html');
+		assert.strictEqual(contents[1], 'Hello World');
+		assert.strictEqual(contents[2], 'More Changes');
+
+		resolvedModel.dispose();
 		manager.dispose();
 	});
 

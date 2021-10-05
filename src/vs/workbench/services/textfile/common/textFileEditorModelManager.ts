@@ -307,8 +307,8 @@ export class TextFileEditorModelManager extends Disposable implements ITextFileE
 
 		// Await a pending model resolve first before proceeding
 		// to ensure that we never resolve a model more than once
-		// in parallel
-		const pendingResolve = this.joinPendingResolve(resource);
+		// in parallel.
+		const pendingResolve = this.joinPendingResolves(resource);
 		if (pendingResolve) {
 			await pendingResolve;
 		}
@@ -394,9 +394,7 @@ export class TextFileEditorModelManager extends Disposable implements ITextFileE
 		} catch (error) {
 
 			// Free resources of this invalid model
-			if (model) {
-				model.dispose();
-			}
+			model.dispose();
 
 			// Remove from pending resolves
 			this.mapResourceToPendingModelResolvers.delete(resource);
@@ -405,13 +403,30 @@ export class TextFileEditorModelManager extends Disposable implements ITextFileE
 		}
 	}
 
-	private joinPendingResolve(resource: URI): Promise<void> | undefined {
+	private joinPendingResolves(resource: URI): Promise<void> | undefined {
 		const pendingModelResolve = this.mapResourceToPendingModelResolvers.get(resource);
-		if (pendingModelResolve) {
-			return pendingModelResolve.then(undefined, error => {/* ignore any error here, it will bubble to the original requestor*/ });
+		if (!pendingModelResolve) {
+			return;
 		}
 
-		return undefined;
+		return this.doJoinPendingResolve(resource);
+	}
+
+	private async doJoinPendingResolve(resource: URI): Promise<void> {
+
+		// While we have pending model resolves, ensure
+		// to await the last one finishing before returning.
+		// This prevents a race when multiple clients await
+		// the pending resolve and then all trigger the resolve
+		// at the same time.
+		let pendingModelResolve: Promise<void> | undefined;
+		while (pendingModelResolve = this.mapResourceToPendingModelResolvers.get(resource)) {
+			try {
+				await pendingModelResolve;
+			} catch (error) {
+				// ignore any error here, it will bubble to the original requestor
+			}
+		}
 	}
 
 	private registerModel(model: TextFileEditorModel): void {
@@ -498,8 +513,8 @@ export class TextFileEditorModelManager extends Disposable implements ITextFileE
 
 	private async doCanDispose(model: TextFileEditorModel): Promise<true> {
 
-		// if we have a pending model resolve, await it first and then try again
-		const pendingResolve = this.joinPendingResolve(model.resource);
+		// Await any pending resolves first before proceeding
+		const pendingResolve = this.joinPendingResolves(model.resource);
 		if (pendingResolve) {
 			await pendingResolve;
 

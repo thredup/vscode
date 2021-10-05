@@ -109,26 +109,43 @@ export interface IStoredFileWorkingCopySaveEvent<M extends IStoredFileWorkingCop
 	/**
 	 * The stored file working copy that was successfully saved.
 	 */
-	workingCopy: IStoredFileWorkingCopy<M>;
+	readonly workingCopy: IStoredFileWorkingCopy<M>;
 
 	/**
 	 * The reason why the stored file working copy was saved.
 	 */
-	reason: SaveReason;
+	readonly reason: SaveReason;
 }
 
-export interface IStoredFileWorkingCopyManagerResolveOptions extends IStoredFileWorkingCopyResolveOptions {
+export interface IStoredFileWorkingCopyManagerResolveOptions {
+
+	/**
+	 * The contents to use for the stored file working copy if known. If not
+	 * provided, the contents will be retrieved from the underlying
+	 * resource or backup if present.
+	 *
+	 * If contents are provided, the stored file working copy will be marked
+	 * as dirty right from the beginning.
+	 */
+	readonly contents?: VSBufferReadableStream;
 
 	/**
 	 * If the stored file working copy was already resolved before,
-	 * allows to trigger a reload of it to fetch the latest contents:
-	 * - async: resolve() will return immediately and trigger
-	 *          a reload that will run in the background.
-	 * -  sync: resolve() will only return resolved when the
-	 *          stored file working copy has finished reloading.
+	 * allows to trigger a reload of it to fetch the latest contents.
 	 */
-	reload?: {
-		async: boolean
+	readonly reload?: {
+
+		/**
+		 * Controls whether the reload happens in the background
+		 * or whether `resolve` will await the reload to happen.
+		 */
+		readonly async: boolean;
+
+		/**
+		 * Controls whether to force reading the contents from the
+		 * underlying resource even if the resource did not change.
+		 */
+		readonly force?: boolean;
 	};
 }
 
@@ -429,8 +446,8 @@ export class StoredFileWorkingCopyManager<M extends IStoredFileWorkingCopyModel>
 
 		// Await a pending working copy resolve first before proceeding
 		// to ensure that we never resolve a working copy more than once
-		// in parallel
-		const pendingResolve = this.joinPendingResolve(resource);
+		// in parallel.
+		const pendingResolve = this.joinPendingResolves(resource);
 		if (pendingResolve) {
 			await pendingResolve;
 		}
@@ -439,12 +456,17 @@ export class StoredFileWorkingCopyManager<M extends IStoredFileWorkingCopyModel>
 		let workingCopy = this.get(resource);
 		let didCreateWorkingCopy = false;
 
+		const resolveOptions: IStoredFileWorkingCopyResolveOptions = {
+			contents: options?.contents,
+			forceReadFromFile: options?.reload?.force
+		};
+
 		// Working copy exists
 		if (workingCopy) {
 
 			// Always reload if contents are provided
 			if (options?.contents) {
-				workingCopyResolve = workingCopy.resolve(options);
+				workingCopyResolve = workingCopy.resolve(resolveOptions);
 			}
 
 			// Reload async or sync based on options
@@ -452,13 +474,13 @@ export class StoredFileWorkingCopyManager<M extends IStoredFileWorkingCopyModel>
 
 				// Async reload: trigger a reload but return immediately
 				if (options.reload.async) {
-					workingCopy.resolve(options);
+					workingCopy.resolve(resolveOptions);
 					workingCopyResolve = Promise.resolve();
 				}
 
 				// Sync reload: do not return until working copy reloaded
 				else {
-					workingCopyResolve = workingCopy.resolve(options);
+					workingCopyResolve = workingCopy.resolve(resolveOptions);
 				}
 			}
 
@@ -482,7 +504,7 @@ export class StoredFileWorkingCopyManager<M extends IStoredFileWorkingCopyModel>
 				this.editorService, this.elevatedFileService
 			);
 
-			workingCopyResolve = workingCopy.resolve(options);
+			workingCopyResolve = workingCopy.resolve(resolveOptions);
 
 			this.registerWorkingCopy(workingCopy);
 		}
@@ -532,13 +554,30 @@ export class StoredFileWorkingCopyManager<M extends IStoredFileWorkingCopyModel>
 		}
 	}
 
-	private joinPendingResolve(resource: URI): Promise<void> | undefined {
+	private joinPendingResolves(resource: URI): Promise<void> | undefined {
 		const pendingWorkingCopyResolve = this.mapResourceToPendingWorkingCopyResolve.get(resource);
-		if (pendingWorkingCopyResolve) {
-			return pendingWorkingCopyResolve.then(undefined, error => {/* ignore any error here, it will bubble to the original requestor*/ });
+		if (!pendingWorkingCopyResolve) {
+			return;
 		}
 
-		return undefined;
+		return this.doJoinPendingResolve(resource);
+	}
+
+	private async doJoinPendingResolve(resource: URI): Promise<void> {
+
+		// While we have pending working copy resolves, ensure
+		// to await the last one finishing before returning.
+		// This prevents a race when multiple clients await
+		// the pending resolve and then all trigger the resolve
+		// at the same time.
+		let pendingWorkingCopyResolve: Promise<void> | undefined;
+		while (pendingWorkingCopyResolve = this.mapResourceToPendingWorkingCopyResolve.get(resource)) {
+			try {
+				await pendingWorkingCopyResolve;
+			} catch (error) {
+				// ignore any error here, it will bubble to the original requestor
+			}
+		}
 	}
 
 	private registerWorkingCopy(workingCopy: IStoredFileWorkingCopy<M>): void {
@@ -594,8 +633,8 @@ export class StoredFileWorkingCopyManager<M extends IStoredFileWorkingCopyModel>
 
 	private async doCanDispose(workingCopy: IStoredFileWorkingCopy<M>): Promise<true> {
 
-		// If we have a pending working copy resolve, await it first and then try again
-		const pendingResolve = this.joinPendingResolve(workingCopy.resource);
+		// Await any pending resolves first before proceeding
+		const pendingResolve = this.joinPendingResolves(workingCopy.resource);
 		if (pendingResolve) {
 			await pendingResolve;
 
